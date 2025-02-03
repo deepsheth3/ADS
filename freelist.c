@@ -23,6 +23,8 @@
 
 #define INT_ACCESS_ONCE(var)	((int)(*((volatile int *)&(var))))
 
+static bool useFIFO = false;
+
 
 /*
  * The shared freelist control information.
@@ -69,7 +71,13 @@ typedef struct {
 } FIFO_BufferStrategyControl
 
 /* Pointers to shared state */
-static BufferStrategyControl *StrategyControl = NULL;
+if (use_FIFO){
+	static FIFO_BufferStrategyControl *StrategyControl = NULL;
+}
+else{
+	static BufferStrategyControl *StrategyControl = NULL;
+}
+
 
 /*
  * Private (non-shared) state for managing a ring of shared buffers to re-use.
@@ -378,7 +386,40 @@ StrategyGetBuffer_Default(BufferAccessStrategy strategy, uint32 *buf_state, bool
 }
 
 BufferDesc *
-StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring){
+
+	BufferDesc *buf;
+	uint32		local_buf_state;	/* to avoid repeated (de-)referencing */
+
+	*from_ring = false;
+
+	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+
+	if (StrategyControl->size) == 0{
+		SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+	}
+	
+	
+	int bufferID = StrategyControl->queue[StrategyControl->head];
+    StrategyControl->head = (StrategyControl->head + 1) % NBuffers;
+    StrategyControl->size--;
+
+	buf = GetBufferDescriptor(bufferID);
+	SpinLockRelease(&StrategyControl->buffer_strategy_lock);	
+	local_buf_state = LockBufHdr(buf);
+	if (BUF_STATE_GET_REFCOUNT(local_buf_state) == 0 &&
+        BUF_STATE_GET_USAGECOUNT(local_buf_state) == 0)
+    {
+        *buf_state = local_buf_state;
+        return buf;
+    }
+    else
+    {
+        UnlockBufHdr(buf, local_buf_state);
+        return StrategyGetFIFOBuffer(strategy, buf_state, from_ring); // Retry
+    }
+
+}
 
 /*
  * StrategyFreeBuffer: put a buffer on the freelist
@@ -387,17 +428,29 @@ void
 StrategyFreeBuffer(BufferDesc *buf)
 {
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
+	
+	if (useFIFO)
+    {
+        if (StrategyControl->size < NBuffers)
+        {
+            StrategyControl->tail = (StrategyControl->tail + 1) % NBuffers;
+            StrategyControl->queue[StrategyControl->tail] = buf->buf_id;
+            StrategyControl->size++;
+        }
+    }
 
 	/*
 	 * It is possible that we are told to put something in the freelist that
 	 * is already in it; don't screw up the list if so.
 	 */
-	if (buf->freeNext == FREENEXT_NOT_IN_LIST)
-	{
-		buf->freeNext = StrategyControl->firstFreeBuffer;
-		if (buf->freeNext < 0)
-			StrategyControl->lastFreeBuffer = buf->buf_id;
-		StrategyControl->firstFreeBuffer = buf->buf_id;
+	else{
+		if (buf->freeNext == FREENEXT_NOT_IN_LIST)
+		{
+			buf->freeNext = StrategyControl->firstFreeBuffer;
+			if (buf->freeNext < 0)
+				StrategyControl->lastFreeBuffer = buf->buf_id;
+			StrategyControl->firstFreeBuffer = buf->buf_id;
+		}
 	}
 
 	SpinLockRelease(&StrategyControl->buffer_strategy_lock);
@@ -498,7 +551,6 @@ void
 StrategyInitialize(bool init)
 {
 	bool		found;
-	bool		found_FIFO
 
 	/*
 	 * Initialize the shared buffer lookup hashtable.
@@ -520,10 +572,6 @@ StrategyInitialize(bool init)
 						sizeof(BufferStrategyControl),
 						&found);
 	
-	FIFO_StrategyControl = (FIFO_BufferStrategyControl *)
-		ShmemInitStruct("FIFO Buffer Strategy Status",
-						sizeof(FIFO_BufferStrategyControl),
-						&found);
 
 	if (!found)
 	{
