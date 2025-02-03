@@ -61,6 +61,13 @@ typedef struct
 	int			bgwprocno;
 } BufferStrategyControl;
 
+typedef struct {
+	int q[NBuffers];
+	int start;
+	int end;
+	int size;
+} FIFO_BufferStrategyControl
+
 /* Pointers to shared state */
 static BufferStrategyControl *StrategyControl = NULL;
 
@@ -192,8 +199,22 @@ have_free_buffer(void)
  *	To ensure that no one else can pin the buffer before we do, we must
  *	return the buffer with the buffer header spinlock still held.
  */
+
 BufferDesc *
-StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+StrategyGetBuffer_Default(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+{
+	if (use_FIFO){
+		return StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+	}
+	else{
+		return StrategyGetBuffer_Default(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+	}
+
+}
+
+
+BufferDesc *
+StrategyGetBuffer_Default(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
 {
 	BufferDesc *buf;
 	int			bgwprocno;
@@ -356,6 +377,9 @@ StrategyGetBuffer(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_r
 	}
 }
 
+BufferDesc *
+StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *from_ring)
+
 /*
  * StrategyFreeBuffer: put a buffer on the freelist
  */
@@ -474,6 +498,7 @@ void
 StrategyInitialize(bool init)
 {
 	bool		found;
+	bool		found_FIFO
 
 	/*
 	 * Initialize the shared buffer lookup hashtable.
@@ -494,6 +519,11 @@ StrategyInitialize(bool init)
 		ShmemInitStruct("Buffer Strategy Status",
 						sizeof(BufferStrategyControl),
 						&found);
+	
+	FIFO_StrategyControl = (FIFO_BufferStrategyControl *)
+		ShmemInitStruct("FIFO Buffer Strategy Status",
+						sizeof(FIFO_BufferStrategyControl),
+						&found);
 
 	if (!found)
 	{
@@ -510,6 +540,7 @@ StrategyInitialize(bool init)
 		 */
 		StrategyControl->firstFreeBuffer = 0;
 		StrategyControl->lastFreeBuffer = NBuffers - 1;
+
 
 		/* Initialize the clock sweep pointer */
 		pg_atomic_init_u32(&StrategyControl->nextVictimBuffer, 0);
