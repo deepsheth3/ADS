@@ -395,14 +395,17 @@ StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *f
 
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 
-	if (StrategyControl->size) == 0{
+	FIFO_BufferStrategyControl *fifoControl = (FIFO_BufferStrategyControl *)StrategyControl;
+
+	if (fifoControl->size == 0)
+	{
 		SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+		return NULL;  // No buffers available
 	}
-	
-	
-	int bufferID = StrategyControl->queue[StrategyControl->head];
-    StrategyControl->head = (StrategyControl->head + 1) % NBuffers;
-    StrategyControl->size--;
+
+	int bufferID = fifoControl->q[fifoControl->start];
+	fifoControl->start = (fifoControl->start + 1) % NBuffers;
+	fifoControl->size--;
 
 	buf = GetBufferDescriptor(bufferID);
 	SpinLockRelease(&StrategyControl->buffer_strategy_lock);	
@@ -416,7 +419,7 @@ StrategyGetBuffer_FIFO(BufferAccessStrategy strategy, uint32 *buf_state, bool *f
     else
     {
         UnlockBufHdr(buf, local_buf_state);
-        return StrategyGetFIFOBuffer(strategy, buf_state, from_ring); // Retry
+        return StrategyGetBuffer_FIFO(strategy, buf_state, from_ring); // Retry
     }
 
 }
@@ -430,14 +433,18 @@ StrategyFreeBuffer(BufferDesc *buf)
 	SpinLockAcquire(&StrategyControl->buffer_strategy_lock);
 	
 	if (useFIFO)
-    {
-        if (StrategyControl->size < NBuffers)
-        {
-            StrategyControl->tail = (StrategyControl->tail + 1) % NBuffers;
-            StrategyControl->queue[StrategyControl->tail] = buf->buf_id;
-            StrategyControl->size++;
-        }
-    }
+	{
+		FIFO_BufferStrategyControl *fifoControl = (FIFO_BufferStrategyControl *)StrategyControl;
+
+		if (fifoControl->size < NBuffers)  // Check for queue capacity
+		{
+			fifoControl->q[fifoControl->end] = buf->buf_id;
+			fifoControl->end = (fifoControl->end + 1) % NBuffers;
+			fifoControl->size++;
+		}
+		SpinLockRelease(&StrategyControl->buffer_strategy_lock);
+		return;
+	}
 
 	/*
 	 * It is possible that we are told to put something in the freelist that
@@ -550,58 +557,62 @@ StrategyShmemSize(void)
 void
 StrategyInitialize(bool init)
 {
-	bool		found;
+    bool found;
 
-	/*
-	 * Initialize the shared buffer lookup hashtable.
-	 *
-	 * Since we can't tolerate running out of lookup table entries, we must be
-	 * sure to specify an adequate table size here.  The maximum steady-state
-	 * usage is of course NBuffers entries, but BufferAlloc() tries to insert
-	 * a new entry before deleting the old.  In principle this could be
-	 * happening in each partition concurrently, so we could need as many as
-	 * NBuffers + NUM_BUFFER_PARTITIONS entries.
-	 */
-	InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS);
+    /*
+     * Initialize the shared buffer lookup hashtable.
+     */
+    InitBufTable(NBuffers + NUM_BUFFER_PARTITIONS);
 
-	/*
-	 * Get or create the shared strategy control block
-	 */
-	StrategyControl = (BufferStrategyControl *)
-		ShmemInitStruct("Buffer Strategy Status",
-						sizeof(BufferStrategyControl),
-						&found);
-	
+    /*
+     * Get or create the shared strategy control block.
+     */
+    if (useFIFO)
+    {
+        FIFO_BufferStrategyControl *fifoControl = (FIFO_BufferStrategyControl *)
+            ShmemInitStruct("FIFO Buffer Strategy Status", sizeof(FIFO_BufferStrategyControl), &found);
 
-	if (!found)
-	{
-		/*
-		 * Only done once, usually in postmaster
-		 */
-		Assert(init);
+        if (!found)
+        {
+            Assert(init);
 
-		SpinLockInit(&StrategyControl->buffer_strategy_lock);
+            fifoControl->start = 0;
+            fifoControl->end = 0;
+            fifoControl->size = 0;
 
-		/*
-		 * Grab the whole linked list of free buffers for our strategy. We
-		 * assume it was previously set up by InitBufferPool().
-		 */
-		StrategyControl->firstFreeBuffer = 0;
-		StrategyControl->lastFreeBuffer = NBuffers - 1;
+            // Optionally clear the queue
+            memset(fifoControl->q, -1, sizeof(fifoControl->q));
+        }
 
+        StrategyControl = (void *)fifoControl;  // Assign to generic pointer
+    }
+    else
+    {
+        BufferStrategyControl *clockControl = (BufferStrategyControl *)
+            ShmemInitStruct("Buffer Strategy Status", sizeof(BufferStrategyControl), &found);
 
-		/* Initialize the clock sweep pointer */
-		pg_atomic_init_u32(&StrategyControl->nextVictimBuffer, 0);
+        if (!found)
+        {
+            Assert(init);
 
-		/* Clear statistics */
-		StrategyControl->completePasses = 0;
-		pg_atomic_init_u32(&StrategyControl->numBufferAllocs, 0);
+            SpinLockInit(&clockControl->buffer_strategy_lock);
 
-		/* No pending notification */
-		StrategyControl->bgwprocno = -1;
-	}
-	else
-		Assert(!init);
+            clockControl->firstFreeBuffer = 0;
+            clockControl->lastFreeBuffer = NBuffers - 1;
+
+            /* Initialize the clock sweep pointer */
+            pg_atomic_init_u32(&clockControl->nextVictimBuffer, 0);
+
+            /* Clear statistics */
+            clockControl->completePasses = 0;
+            pg_atomic_init_u32(&clockControl->numBufferAllocs, 0);
+
+            /* No pending notification */
+            clockControl->bgwprocno = -1;
+        }
+
+        StrategyControl = (void *)clockControl;  // Assign to generic pointer
+    }
 }
 
 
