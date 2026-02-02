@@ -25,20 +25,20 @@ Both strategies use spinlock-protected shared memory and support PostgreSQL's ri
 
 ```mermaid
 graph TB
-    subgraph "Buffer Pool"
-        BUF[Buffer Descriptors<br/>NBuffers entries]
-        HASH[Buffer Hash Table<br/>Page → Buffer mapping]
+    subgraph Buffer_Pool
+        BUF["Buffer Descriptors"]
+        HASH["Buffer Hash Table"]
     end
     
-    subgraph "Replacement Strategy"
-        CTRL[StrategyControl<br/>Shared State]
-        CLOCK[Clock Sweep<br/>nextVictimBuffer + usage_count]
-        FIFO_Q[FIFO Queue<br/>Circular queue q[NBuffers]]
+    subgraph Replacement_Strategy
+        CTRL["StrategyControl"]
+        CLOCK["Clock Sweep"]
+        FIFO_Q["FIFO Queue"]
     end
     
-    subgraph "Concurrency Control"
-        SPIN[buffer_strategy_lock<br/>Spinlock]
-        ATOMIC[Atomic Operations<br/>pg_atomic_uint32]
+    subgraph Concurrency_Control
+        SPIN["buffer_strategy_lock"]
+        ATOMIC["Atomic Operations"]
     end
     
     BUF --> CTRL
@@ -46,9 +46,6 @@ graph TB
     CTRL --> FIFO_Q
     SPIN --> CTRL
     ATOMIC --> CLOCK
-    
-    style CLOCK fill:#90EE90
-    style FIFO_Q fill:#FFB6C1
 ```
 
 ## Run Locally
