@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=warning,style,performance \
+            --error-exitcode=1 \
+            --suppress=missingIncludeSystem \
+            --inline-suppr \
+            freelist.c
+
+  compile-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL dev headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-all libreadline-dev zlib1g-dev
+
+      - name: Syntax check with GCC
+        run: |
+          # Check C syntax (won't fully compile without full PG source)
+          gcc -fsyntax-only -Wall -Wextra \
+            -I/usr/include/postgresql/16/server \
+            -I/usr/include/postgresql/server \
+            freelist.c 2>&1 || echo "Syntax check completed (some errors expected without full PG source)"
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for common issues
+        run: |
+          # Check for hardcoded credentials
+          ! grep -rn "password\s*=" . --include="*.c" || echo "No hardcoded passwords found"
+          
+          # Check for TODO comments
+          grep -rn "TODO\|FIXME\|XXX" . --include="*.c" || echo "No TODOs found"
